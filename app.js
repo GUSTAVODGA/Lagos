@@ -32,7 +32,7 @@ let me = null; // { uid, email, nome }
 
 // Estado compartilhado (espelho do Firestore ou do localStorage no demo)
 // (anexos ficam fora dos listeners: são carregados sob demanda, por item)
-let S = { vehicles: [], drivers: [], tx: [], kmlog: [], profiles: {}, anexos: [], eventos: [], empresa: [] };
+let S = { vehicles: [], drivers: [], tx: [], kmlog: [], profiles: {}, anexos: [], eventos: [], empresa: [], financiamentos: [] };
 let unsubs = [];
 
 // Estado de UI
@@ -43,6 +43,8 @@ let txTipo = 'despesa', txCat = null, txOrigem = 'frota';
 let editingTxId = null, detailTxId = null, _salvandoTx = false, _salvandoNota = false;
 let editingVehId = null, detailVehId = null;
 let editingDrvId = null;
+let finFormVehId = null, finEditId = null, finFinanciadoTocado = false, _salvandoFin = false;
+let finPagId = null, _salvandoPag = false;
 
 // ══════════════════════════════════════════
 // ÍCONES — biblioteca única (SVG inline, traço consistente)
@@ -144,9 +146,18 @@ const CATS = {
     { id: 'outros_r',  nome: 'Outros',       ico: 'coins' },
   ]
 };
+// Categorias internas: reconhecidas por catInfo (nome/ícone corretos em listas,
+// filtros e PDF quando houver lançamentos), mas propositalmente FORA das grades
+// selecionáveis (CATS.despesa/escritorio/receita). Assim a categoria existe sem
+// expor um botão de função ainda incompleta. "financiamento" só passará a ser
+// lançável quando o fluxo de pagamento de parcela (etapa posterior) existir.
+const CATS_INTERNAS = [
+  { id: 'financiamento', nome: 'Financiamento', ico: 'landmark' },
+];
 function catInfo(id) {
   return CATS.despesa.find(c => c.id === id) || CATS.escritorio.find(c => c.id === id) ||
-    CATS.receita.find(c => c.id === id) || { id, nome: 'Outros', ico: 'package' };
+    CATS.receita.find(c => c.id === id) || CATS_INTERNAS.find(c => c.id === id) ||
+    { id, nome: 'Outros', ico: 'package' };
 }
 // origem de um lançamento: registros antigos não têm o campo — deduz pela categoria
 function origemDe(t) {
@@ -334,7 +345,7 @@ function salvarEmpresaDoc(patch) {
 
 function startListeners() {
   stopListeners();
-  ['vehicles', 'drivers', 'tx', 'kmlog', 'eventos', 'empresa'].forEach(coll => {
+  ['vehicles', 'drivers', 'tx', 'kmlog', 'eventos', 'empresa', 'financiamentos'].forEach(coll => {
     unsubs.push(db.collection(coll).onSnapshot(snap => {
       S[coll] = snap.docs.map(d => ({ ...d.data(), id: d.id }));
       renderAll();
@@ -1191,8 +1202,12 @@ function renderLanc() {
   const catSel = $('lanc-cat-filter');
   const curCat = catSel.value;
   const opt = c => `<option value="${c.id}">${c.nome}</option>`;
+  // "Financiamento" só entra no FILTRO quando já existe algum pagamento — nunca
+  // vira opção de criar despesa avulsa (a grade do lançamento não o inclui).
+  const frotaCats = S.tx.some(t => !t.deleted && t.cat === 'financiamento')
+    ? CATS.despesa.concat(CATS_INTERNAS.filter(c => c.id === 'financiamento')) : CATS.despesa;
   catSel.innerHTML = '<option value="">Todas as categorias</option>' +
-    `<optgroup label="Frota">${CATS.despesa.map(opt).join('')}</optgroup>` +
+    `<optgroup label="Frota">${frotaCats.map(opt).join('')}</optgroup>` +
     `<optgroup label="Escritório">${CATS.escritorio.map(opt).join('')}</optgroup>` +
     `<optgroup label="Receitas">${CATS.receita.map(opt).join('')}</optgroup>`;
   catSel.value = curCat;
@@ -1279,6 +1294,7 @@ let pendingAnexo = null; // nota importada aguardando o salvamento do lançament
 
 function openTxForm(tx) {
   if (!exigirEdicao()) return;
+  if (tx && ehPagamentoFin(tx)) { toast('Pagamento de financiamento: exclua e registre novamente pelo contrato.'); return; }
   pendingAnexo = null;
   $('tx-anexo-chip').style.display = 'none';
   editingTxId = tx ? tx.id : null;
@@ -1436,18 +1452,25 @@ function openTxDetail(id) {
   if (t.km) rows.push(['Odômetro', fmtKm(t.km)]);
   if (t.desc) rows.push(['Descrição', t.desc]);
   rows.push(['Lançado por', (t.autorNome || '—') + (t.ts ? ' · ' + fmtDataHora(t.ts) : '')]);
+  const pagFin = ehPagamentoFin(t);
   $('tx-detail-body').innerHTML = '<div class="detail-rows">' +
     rows.map(([k, v]) => `<div class="detail-row"><small>${k}</small><b>${esc(v)}</b></div>`).join('') +
     '</div>' +
+    (pagFin ? '<p class="modal-note" style="margin-bottom:12px">Pagamento de financiamento. Para corrigir, exclua e registre de novo pelo contrato — assim o vínculo com a parcela é preservado.</p>' : '') +
     (t.veiculo && vehById(t.veiculo)
       ? `<button class="btn btn-secondary btn-block" style="margin-bottom:12px" onclick="closeOverlay('modal-tx-detail');openVehDetail('${t.veiculo}')">${icon('truck', 16)} Abrir ficha da ${esc(vehNome(t.veiculo))}</button>`
       : '') +
     '<div class="anexos-list" id="tx-anexos"></div>';
+  // pagamento de financiamento não pode ser editado pelo editor genérico
+  // (evita trocar de categoria ou perder financiamentoId/parcelaNum). Só excluir.
+  const editBtn = $('tx-edit-btn');
+  if (editBtn) editBtn.style.display = pagFin ? 'none' : '';
   renderAnexosInto('tx-anexos', id, 'tx');
   openOverlay('modal-tx-detail');
 }
 function editTxFromDetail() {
   const t = S.tx.find(x => x.id === detailTxId);
+  if (t && ehPagamentoFin(t)) { toast('Pagamento de financiamento: exclua e registre novamente pelo contrato.'); return; }
   closeOverlay('modal-tx-detail');
   if (t) openTxForm(t);
 }
@@ -1755,6 +1778,12 @@ async function saveVehicle() {
 
 function deleteVehicleFromForm() {
   const id = editingVehId;
+  // não permite excluir um veículo que tem financiamento vinculado — isso deixaria
+  // o contrato órfão (só é visto pela ficha do veículo). Oriente a DESATIVAR.
+  if ((S.financiamentos || []).some(f => f.veiculo === id)) {
+    toast('Este veículo tem financiamento vinculado. Resolva o contrato ou use "Inativo" em vez de excluir.');
+    return;
+  }
   confirmDialog('Excluir veículo', 'Os lançamentos já feitos serão mantidos no histórico. Excluir o veículo?', async () => {
     closeOverlay('modal-veh');
     try { await dataDelete('vehicles', id); toast('Veículo excluído'); }
@@ -1834,6 +1863,8 @@ function openVehDetail(id) {
       <button class="qa" onclick="openKmForm('${id}')">${icon('mapPin', 22)}Atualizar<br>KM</button>
       <button class="qa" onclick="pickAnexo('vehicle','${id}','veh-anexos')">${icon('filePlus', 22)}Adicionar<br>documento</button>
     </div>
+
+    ${financiamentoBlocoHTML(id)}
 
     <h2 class="sec-title">${icon('history', 14)} Histórico</h2>
     <div id="van-timeline"><div class="empty-mini">Carregando…</div></div>
@@ -2434,6 +2465,7 @@ function exportBackup() {
       tx: S.tx,
       kmlog: S.kmlog,
       eventos: S.eventos || [],
+      financiamentos: S.financiamentos || [],
     };
     const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
@@ -2444,6 +2476,460 @@ function exportBackup() {
     toast('Cópia de segurança baixada ✓');
   } catch (e) { console.error(e); toast('Não foi possível gerar o backup agora.'); }
 }
+
+// Restaura um backup (.json) para o estado, coleção por coleção.
+// SEGURO: só substitui as coleções PRESENTES no arquivo. Uma coleção ausente
+// (ex.: backup antigo sem 'financiamentos') é PRESERVADA como está — nunca apaga
+// o que o arquivo não traz. Retorna a lista de coleções efetivamente aplicadas.
+// (Ainda não ligada a nenhum botão — fundação para a restauração.)
+async function restaurarBackup(backup) {
+  if (!backup || typeof backup !== 'object') throw new Error('Backup inválido.');
+  const COLS = ['vehicles', 'drivers', 'tx', 'kmlog', 'eventos', 'financiamentos'];
+  const aplicadas = [];
+  for (const coll of COLS) {
+    if (!Array.isArray(backup[coll])) continue; // ausente/antigo → preserva o atual
+    S[coll] = backup[coll].map(x => ({ ...x }));
+    aplicadas.push(coll);
+  }
+  if (backup.empresa && typeof backup.empresa === 'object') {
+    const { id, ...resto } = backup.empresa;
+    S.empresa = [{ ...resto, id: 'dados' }];
+    aplicadas.push('empresa');
+  }
+  demoSave();
+  renderAll();
+  return aplicadas;
+}
+
+// ══════════════════════════════════════════
+// FINANCIAMENTOS — fundação de dados (sem UI ainda)
+// Modelo do contrato + métricas derivadas. Nada aqui cria registros sozinho:
+// as funções só são chamadas pelas etapas seguintes (cadastro/pagamento).
+// ══════════════════════════════════════════
+
+// arredonda para centavos (evita resíduos de ponto flutuante, ex.: R$ 0,01)
+function centavos(v) { return Math.round((Number(v) || 0) * 100) / 100; }
+
+// soma N meses a uma data YYYY-MM-DD, com clamp do dia ao último dia do mês
+// (ex.: 31/01 + 1 mês → 28/02). Usada para derivar vencimentos das parcelas.
+function addMesesData(ymd, n) {
+  if (!ymd) return '';
+  const [y, m, d] = String(ymd).split('-').map(Number);
+  if (!y || !m || !d) return '';
+  const total = (m - 1) + (Number(n) || 0);
+  const ny = y + Math.floor(total / 12);
+  const nm = ((total % 12) + 12) % 12; // 0..11
+  const ultimoDia = new Date(ny, nm + 1, 0).getDate();
+  const nd = Math.min(d, ultimoDia);
+  return ny + '-' + String(nm + 1).padStart(2, '0') + '-' + String(nd).padStart(2, '0');
+}
+
+// Fábrica do contrato: identificadores e metadados consistentes com o app
+// (mesmo padrão de newId/autor/timestamps usado em veículos e lançamentos).
+// Vários financiamentos por veículo são permitidos (cada um tem id próprio).
+// PERSISTE apenas o estado ADMINISTRATIVO em `status`: 'ativo' ou 'cancelado'.
+// Nunca grava 'quitado' — quitado/em dia/atrasado são DERIVADOS (ver resumo).
+function novoFinanciamento(dados = {}) {
+  return {
+    id: dados.id || newId(),
+    veiculo: dados.veiculo || '',
+    credor: (dados.credor || '').trim(),
+    valorTotal: centavos(dados.valorTotal),
+    entrada: centavos(dados.entrada),             // fica só no contrato; não gera despesa
+    valorFinanciado: centavos(dados.valorFinanciado),
+    numParcelas: Number(dados.numParcelas) || 0,
+    valorParcela: centavos(dados.valorParcela),
+    // parcelas já quitadas ANTES de começar o controle no Lagos (base inicial).
+    // Não geram tx nem despesa; representam as primeiras parcelas como concluídas.
+    parcelasAntesLagos: Math.max(0, Math.floor(Number(dados.parcelasAntesLagos) || 0)),
+    primeiroVencimento: dados.primeiroVencimento || '', // data completa YYYY-MM-DD
+    obs: (dados.obs || '').trim(),
+    status: dados.status === 'cancelado' ? 'cancelado' : 'ativo', // administrativo apenas
+    criadoPorNome: dados.criadoPorNome || (me && (me.nome || me.email)) || '',
+    criadoEm: dados.criadoEm || Date.now(),
+    atualizadoPorNome: (me && (me.nome || me.email)) || '',
+    atualizadoEm: Date.now(),
+  };
+}
+
+// Pagamentos de um contrato = lançamentos (tx) vinculados por financiamentoId,
+// categoria 'financiamento', não deletados. A verdade das parcelas pagas vem
+// da CONTAGEM desses tx (nunca de um contador gravado).
+function financiamentoPagamentos(finId) {
+  return S.tx.filter(t => !t.deleted && t.financiamentoId === finId && t.cat === 'financiamento');
+}
+
+// Métricas e SITUAÇÃO derivadas do contrato. O único estado persistido é
+// 'ativo'/'cancelado'; aqui derivamos a situação real a partir das parcelas,
+// valores e vencimentos — sem depender de um status gravado que possa divergir:
+//   - cancelado : estado administrativo gravado
+//   - quitado   : parcelas concluídas E saldo <= 0 (em centavos)
+//   - atrasado  : existe parcela em aberto com vencimento anterior a hoje
+//                 (ou saldo em aberto sem parcela futura agendada)
+//   - em dia    : ainda há parcelas, mas nenhuma vencida
+function financiamentoResumo(fin) {
+  const numParcelas = Number(fin.numParcelas) || 0;
+  const valorParcela = Number(fin.valorParcela) || 0;
+  // base inicial: parcelas quitadas antes do cadastro (não são tx). Cobrem as
+  // parcelas 1..base como concluídas, sem virar despesa.
+  const base = Math.max(0, Math.min(Math.floor(Number(fin.parcelasAntesLagos) || 0), numParcelas));
+  const pagos = financiamentoPagamentos(fin.id);
+  const parcelasPagas = Math.min(numParcelas, base + pagos.length);
+  // totalPago = base × valor da parcela (histórico) + pagamentos do Lagos
+  const totalPagoBase = centavos(base * valorParcela);
+  const totalPagoTx = centavos(pagos.reduce((s, t) => s + (Number(t.valor) || 0), 0));
+  const totalPago = centavos(totalPagoBase + totalPagoTx);
+  const parcelasRestantes = Math.max(0, numParcelas - parcelasPagas);
+  // valorFinanciado é o principal (informativo). O que ainda falta DESEMBOLSAR
+  // é o total das parcelas (com juros) menos o já pago (base + Lagos).
+  const valorFinanciado = centavos(fin.valorFinanciado);
+  const totalParcelas = centavos(numParcelas * valorParcela);
+  const saldoRestante = centavos(totalParcelas - totalPago);
+
+  // PRIMEIRA parcela ainda em aberto, por NÚMERO da parcela. Parcelas 1..base
+  // contam como concluídas; além disso, as pagas por tx (parcelaNum). Assim o
+  // próximo vencimento é sempre a primeira que ainda não foi coberta.
+  const pagasNums = new Set(pagos.map(t => Number(t.parcelaNum)).filter(n => n > 0));
+  let primeiraEmAberto = 0;
+  for (let n = 1; n <= numParcelas; n++) { if (n <= base || pagasNums.has(n)) continue; primeiraEmAberto = n; break; }
+
+  // vencimento da 1ª parcela em aberto = primeiroVencimento + (nº - 1) meses.
+  // Cancelado não mostra próximo vencimento.
+  const proximoVencimento = (primeiraEmAberto > 0 && fin.status !== 'cancelado' && fin.primeiroVencimento)
+    ? addMesesData(fin.primeiroVencimento, primeiraEmAberto - 1) : '';
+
+  let situacao;
+  if (fin.status === 'cancelado') {
+    situacao = 'cancelado';
+  } else if (numParcelas > 0 && parcelasPagas >= numParcelas && saldoRestante <= 0) {
+    situacao = 'quitado';
+  } else if (proximoVencimento) {
+    // no dia exato do vencimento ainda é "em dia"; atrasado só a partir do dia seguinte
+    situacao = proximoVencimento < todayStr() ? 'atrasado' : 'em dia';
+  } else if (saldoRestante > 0) {
+    situacao = 'atrasado'; // devia mais e não há parcela futura agendada
+  } else {
+    situacao = 'em dia';
+  }
+  return { parcelasPagas, parcelasRestantes, valorFinanciado, totalParcelas, totalPago, saldoRestante, primeiraEmAberto, proximoVencimento, situacao };
+}
+
+// Exclusão SEGURA de um contrato:
+//   - sem nenhum pagamento vinculado  → pode ser excluído de fato;
+//   - com tx vinculado                → NÃO apaga; arquiva marcando 'cancelado',
+//     preservando o contrato e todos os lançamentos (rastreabilidade).
+// (Ainda não ligada a botão — fundação.)
+async function removerOuArquivarFinanciamento(id) {
+  const fin = S.financiamentos.find(f => f.id === id);
+  if (!fin) return { acao: 'inexistente' };
+  if (financiamentoPagamentos(id).length === 0) {
+    await dataDelete('financiamentos', id);
+    return { acao: 'excluido' };
+  }
+  const { id: _omit, ...resto } = fin;
+  await dataSet('financiamentos', id, {
+    ...resto, status: 'cancelado',
+    atualizadoPorNome: (me && (me.nome || me.email)) || '', atualizadoEm: Date.now(),
+  });
+  return { acao: 'arquivado', motivo: 'contrato possui lançamentos vinculados' };
+}
+
+// Situação derivada → rótulo, classe de cor e prioridade de ordenação.
+// Ativos (atrasado/em dia) vêm primeiro; quitado/cancelado ficam em segundo plano.
+const FIN_SIT = {
+  'atrasado':  { label: 'Atrasado',  cls: 'fin-atraso',    prio: 0, sec: false },
+  'em dia':    { label: 'Em dia',    cls: 'fin-emdia',     prio: 1, sec: false },
+  'quitado':   { label: 'Quitado',   cls: 'fin-quitado',   prio: 2, sec: true },
+  'cancelado': { label: 'Cancelado', cls: 'fin-cancelado', prio: 3, sec: true },
+};
+
+// Bloco SÓ-LEITURA de financiamentos da van (etapa 2). Não grava nada, não
+// gera tx, sem botões funcionais. Usa financiamentoResumo() como fonte.
+function financiamentoBlocoHTML(vid) {
+  const lista = (S.financiamentos || []).filter(f => f.veiculo === vid);
+  const header = `<h2 class="sec-title">${icon('landmark', 14)} Financiamento</h2>`;
+  if (!lista.length) {
+    return header +
+      '<div class="empty-mini">Nenhum financiamento vinculado a este veículo.</div>' +
+      `<button class="btn btn-secondary btn-block" onclick="openFinForm('${vid}')">${icon('plus', 16)} Cadastrar financiamento</button>`;
+  }
+  const cards = lista.map(f => {
+    const r = financiamentoResumo(f);
+    const sit = FIN_SIT[r.situacao] || FIN_SIT['em dia'];
+    const html = `
+      <div class="fin-card ${sit.cls}${sit.sec ? ' fin-sec' : ''}">
+        <div class="fin-head">
+          <b>${esc(f.credor || 'Financiamento')}</b>
+          <span class="fin-chip ${sit.cls}">${sit.label}</span>
+        </div>
+        <div class="vd-grid fin-grid">
+          <div class="vd-cell"><small>Parcela</small><b>${R(f.valorParcela)}</b></div>
+          <div class="vd-cell"><small>Parcelas</small><b>${r.parcelasPagas}/${Number(f.numParcelas) || 0}</b></div>
+          <div class="vd-cell"><small>Total pago</small><b>${R(r.totalPago)}</b></div>
+          <div class="vd-cell"><small>Saldo restante</small><b>${R(r.saldoRestante)}</b></div>
+          <div class="vd-cell fin-cell-wide"><small>Próx. vencimento</small><b>${r.proximoVencimento ? fmtData(r.proximoVencimento) : '—'}</b></div>
+        </div>
+        <div class="fin-actions">
+          ${(r.situacao === 'em dia' || r.situacao === 'atrasado') ? `<button class="btn btn-small" onclick="openFinPagForm('${f.id}')">${icon('plus', 14)} Registrar parcela</button>` : ''}
+          <button class="btn-link" onclick="openFinForm('${vid}','${f.id}')">Editar contrato</button>
+        </div>
+      </div>`;
+    return { prio: sit.prio, venc: r.proximoVencimento || '9999-99-99', html };
+  });
+  cards.sort((a, b) => a.prio - b.prio || a.venc.localeCompare(b.venc));
+  return header + cards.map(c => c.html).join('') +
+    `<button class="btn btn-secondary btn-block" onclick="openFinForm('${vid}')">${icon('plus', 16)} Novo financiamento</button>`;
+}
+
+// data YYYY-MM-DD por extenso, sem ambiguidade (baseada em string, sem fuso).
+// Ex.: "2026-09-10" → "10 de setembro de 2026".
+function dataPorExtenso(ymd) {
+  if (!ymd) return '';
+  const [y, m, d] = String(ymd).split('-').map(Number);
+  const meses = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
+  if (!y || !m || !d || m < 1 || m > 12) return '';
+  return `${d} de ${meses[m - 1]} de ${y}`;
+}
+
+// formata número em pt-BR com 2 casas para os campos de dinheiro (vazio quando 0)
+function moneyInput(n) {
+  n = Number(n) || 0;
+  return n ? n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '';
+}
+
+// abre o modal de cadastro/edição de financiamento. O veículo vem da ficha e
+// NÃO é trocável no modal (evita mudança silenciosa de vínculo).
+function openFinForm(vid, finId) {
+  if (!exigirEdicao()) return;
+  const f = finId ? (S.financiamentos || []).find(x => x.id === finId) : null;
+  finFormVehId = f ? f.veiculo : vid;   // em edição, mantém o veículo original
+  finEditId = f ? f.id : null;
+  const v = vehById(finFormVehId);
+  $('fin-form-title').textContent = f ? 'Editar financiamento' : 'Novo financiamento';
+  $('fin-veh-info').textContent = 'Veículo: ' + (v ? v.nome : '—');
+  $('fin-credor').value = f ? (f.credor || '') : '';
+  $('fin-valor-total').value = f ? moneyInput(f.valorTotal) : '';
+  $('fin-entrada').value = f ? moneyInput(f.entrada) : '';
+  $('fin-financiado').value = f ? moneyInput(f.valorFinanciado) : '';
+  $('fin-parcelas').value = f && f.numParcelas ? String(f.numParcelas) : '';
+  $('fin-valor-parcela').value = f ? moneyInput(f.valorParcela) : '';
+  $('fin-primeiro-venc').value = f ? (f.primeiroVencimento || '') : '';
+  $('fin-obs').value = f ? (f.obs || '') : '';
+  // base inicial (parcelas pagas antes do Lagos). Bloqueia se já houver pagamento
+  // registrado no Lagos, para evitar sobreposição/contagem dupla.
+  const temPagamentos = f ? financiamentoPagamentos(f.id).length > 0 : false;
+  $('fin-base').value = f ? String(Number(f.parcelasAntesLagos) || 0) : '0';
+  $('fin-base').disabled = temPagamentos;
+  $('fin-base-hint').textContent = temPagamentos
+    ? 'Bloqueado: já há pagamentos registrados no Lagos para este contrato.'
+    : 'Use para pagamentos feitos antes de começar o controle no Lagos. Não serão lançados no Financeiro.';
+  finFinanciadoTocado = !!f;           // edição respeita o valor salvo; novo auto-sugere
+  // ação destrutiva só na EDIÇÃO: "Excluir contrato" (sem pagamentos) ou
+  // "Cancelar contrato" (com pagamentos vinculados).
+  const delBtn = $('fin-del-btn');
+  if (delBtn) {
+    if (f) { delBtn.textContent = financiamentoPagamentos(f.id).length ? 'Cancelar contrato' : 'Excluir contrato'; delBtn.style.display = ''; }
+    else { delBtn.style.display = 'none'; }
+  }
+  finFormRecalc();
+  openOverlay('modal-fin');
+}
+
+// recalcula, sem gravar: sugestão de valor financiado + total das parcelas +
+// custo final estimado (entrada + parcelas).
+function finFormRecalc() {
+  const total = parseValor($('fin-valor-total').value);
+  const entrada = parseValor($('fin-entrada').value);
+  if (!finFinanciadoTocado) {
+    const sug = Math.max(0, centavos(total - entrada));
+    $('fin-financiado').value = moneyInput(sug);
+  }
+  const nP = parseIntBR($('fin-parcelas').value);
+  const vP = parseValor($('fin-valor-parcela').value);
+  const totalParcelas = centavos(nP * vP);
+  const custoFinal = centavos(entrada + totalParcelas);
+  $('fin-resumo').innerHTML =
+    `Total das parcelas: <b>${R(totalParcelas)}</b><br>Custo final estimado (entrada + parcelas): <b>${R(custoFinal)}</b>`;
+  // confirmação da data por extenso (some quando o campo está vazio)
+  const ext = $('fin-venc-extenso');
+  if (ext) {
+    const txt = dataPorExtenso($('fin-primeiro-venc').value);
+    ext.textContent = txt ? 'Primeiro vencimento: ' + txt : '';
+    ext.style.display = txt ? '' : 'none';
+  }
+}
+
+// salva o contrato (cadastro ou edição). NÃO gera tx. Edição preserva id e
+// metadados de criação. Bloqueia entradas inválidas e protege quando já há
+// pagamentos vinculados. Guarda contra duplo toque.
+async function saveFinanciamento() {
+  const orig = finEditId ? (S.financiamentos || []).find(f => f.id === finEditId) : null;
+  const vid = orig ? orig.veiculo : finFormVehId;
+  const credor = $('fin-credor').value.trim();
+  const valorTotal = parseValor($('fin-valor-total').value);
+  const entrada = parseValor($('fin-entrada').value);
+  const valorFinanciado = parseValor($('fin-financiado').value);
+  const numParcelas = parseIntBR($('fin-parcelas').value);
+  const valorParcela = parseValor($('fin-valor-parcela').value);
+  const primeiroVenc = $('fin-primeiro-venc').value;
+  let base = parseIntBR($('fin-base').value);
+
+  if (!vid) { toast('Veículo não identificado.'); return; }
+  if (!credor) { toast('Informe o credor/instituição.'); return; }
+  if (valorTotal < 0 || entrada < 0 || valorFinanciado < 0 || valorParcela < 0) { toast('Valores não podem ser negativos.'); return; }
+  if (entrada > valorTotal) { toast('A entrada não pode ser maior que o valor total.'); return; }
+  if (numParcelas < 1) { toast('Informe uma quantidade de parcelas válida.'); return; }
+  if (valorParcela <= 0) { toast('O valor da parcela deve ser maior que zero.'); return; }
+  if (!primeiroVenc || isNaN(new Date(primeiroVenc + 'T00:00:00').getTime())) { toast('Informe um primeiro vencimento válido.'); return; }
+  if (base < 0 || base > numParcelas) { toast(`Parcelas já pagas antes do cadastro deve ficar entre 0 e ${numParcelas}.`); return; }
+
+  if (orig) {
+    const pagos = financiamentoPagamentos(orig.id);
+    if (pagos.length) {
+      // com pagamentos no Lagos: a base fica travada (evita contagem dupla)
+      base = Math.max(0, Math.floor(Number(orig.parcelasAntesLagos) || 0));
+      const maxNum = Math.max(...pagos.map(t => Number(t.parcelaNum) || 0));
+      if (numParcelas < maxNum) { toast(`Já existe a parcela ${maxNum} paga — o nº de parcelas não pode ser menor.`); return; }
+      const totalPago = centavos(pagos.reduce((s, t) => s + (Number(t.valor) || 0), 0));
+      if (valorFinanciado < totalPago) { toast(`O valor financiado não pode ser menor que o total já pago (${R(totalPago)}).`); return; }
+    }
+  }
+
+  if (_salvandoFin) return;            // evita duplicar por duplo toque
+  _salvandoFin = true;
+  const obj = novoFinanciamento({
+    id: orig ? orig.id : undefined,    // edição preserva o id
+    veiculo: vid, credor, valorTotal, entrada, valorFinanciado,
+    numParcelas, valorParcela, parcelasAntesLagos: base, primeiroVencimento: primeiroVenc,
+    obs: $('fin-obs').value.trim(),
+    status: orig ? orig.status : 'ativo',
+    criadoPorNome: orig ? orig.criadoPorNome : undefined,  // preserva metadados de criação
+    criadoEm: orig ? orig.criadoEm : undefined,
+  });
+  closeOverlay('modal-fin');
+  try {
+    await dataSet('financiamentos', obj.id, obj);
+    toast(orig ? 'Financiamento atualizado ✓' : 'Financiamento cadastrado ✓');
+  } catch (e) { console.error(e); toast('Não foi possível salvar. Tente de novo.'); }
+  _salvandoFin = false;
+}
+
+// Excluir (sem pagamentos) ou Cancelar/arquivar (com pagamentos) o contrato.
+// Delega em removerOuArquivarFinanciamento(), que é o único ponto de decisão:
+// exclusão física só acontece quando NÃO há pagamento vinculado — nem por
+// chamada direta um contrato com tx é apagado.
+let _processandoFin = false;
+async function excluirOuCancelarFin() {
+  if (!exigirEdicao()) return;
+  if (!finEditId) return;
+  const f = (S.financiamentos || []).find(x => x.id === finEditId);
+  if (!f) return;
+  const vid = finFormVehId;
+  const nPag = financiamentoPagamentos(finEditId).length;
+  const nome = f.credor || 'Financiamento';
+  const titulo = nPag ? 'Cancelar contrato' : 'Excluir contrato';
+  const msg = nPag
+    ? `${nome} tem ${nPag} pagamento${nPag > 1 ? 's' : ''} registrado${nPag > 1 ? 's' : ''} no Lagos. O contrato será ARQUIVADO como cancelado — os pagamentos continuam no Financeiro e no PDF, nada é apagado. Confirmar?`
+    : `${nome} não tem pagamentos. Isto remove apenas o contrato — o veículo e os lançamentos não são tocados. Confirmar?`;
+  confirmDialog(titulo, msg, async () => {
+    if (_processandoFin) return;          // evita executar duas vezes
+    _processandoFin = true;
+    try {
+      const r = await removerOuArquivarFinanciamento(finEditId);
+      closeOverlay('modal-fin');
+      if (vid) openVehDetail(vid);         // atualiza o card imediatamente
+      toast(r.acao === 'excluido' ? 'Contrato excluído ✓' : 'Contrato cancelado ✓');
+    } catch (e) { console.error(e); toast('Não foi possível concluir. Tente de novo.'); }
+    _processandoFin = false;
+  });
+}
+
+// ── PAGAMENTO DE PARCELA (Etapa 4) ──
+// Parcelas ainda em aberto: número > base e sem tx (não deletado) para ela.
+function parcelasEmAberto(fin) {
+  const num = Number(fin.numParcelas) || 0;
+  const base = Math.max(0, Math.min(Math.floor(Number(fin.parcelasAntesLagos) || 0), num));
+  const pagas = new Set(financiamentoPagamentos(fin.id).map(t => Number(t.parcelaNum)));
+  const out = [];
+  for (let n = 1; n <= num; n++) { if (n > base && !pagas.has(n)) out.push(n); }
+  return out;
+}
+
+function openFinPagForm(finId) {
+  if (!exigirEdicao()) return;
+  const f = (S.financiamentos || []).find(x => x.id === finId);
+  if (!f) return;
+  const r = financiamentoResumo(f);
+  if (r.situacao === 'cancelado' || r.situacao === 'quitado') { toast('Contrato ' + r.situacao + ' não aceita pagamento.'); return; }
+  finPagId = finId;
+  const v = vehById(f.veiculo);
+  $('finpag-info').textContent = 'Veículo: ' + (v ? v.nome : '—') + ' · ' + (f.credor || 'Financiamento');
+  const abertas = parcelasEmAberto(f);
+  const sel = $('finpag-parcela');
+  sel.innerHTML = abertas.map(n => `<option value="${n}">Parcela ${n}/${f.numParcelas}</option>`).join('');
+  sel.value = String(r.primeiraEmAberto || abertas[0] || '');
+  $('finpag-valor').value = R(f.valorParcela);
+  const hoje = todayStr();
+  $('finpag-data').value = hoje;
+  $('finpag-data').max = hoje;   // impede escolher data futura no seletor nativo
+  finPagChanged();
+  openOverlay('modal-finpag');
+}
+
+// atualiza vencimento derivado e descrição automática ao trocar a parcela
+function finPagChanged() {
+  const f = (S.financiamentos || []).find(x => x.id === finPagId);
+  if (!f) return;
+  const n = parseInt($('finpag-parcela').value, 10) || 0;
+  const venc = n > 0 ? addMesesData(f.primeiroVencimento, n - 1) : '';
+  $('finpag-venc').textContent = venc ? 'Vencimento da parcela: ' + fmtData(venc) + ' (' + dataPorExtenso(venc) + ')' : '';
+  $('finpag-desc').textContent = 'Descrição: Parcela ' + n + '/' + (Number(f.numParcelas) || 0) + ' · ' + (f.credor || 'Financiamento');
+  // confirmação inequívoca da data do pagamento (armazenada em YYYY-MM-DD)
+  const ext = $('finpag-data-extenso');
+  if (ext) {
+    const t = dataPorExtenso($('finpag-data').value);
+    ext.textContent = t ? 'Data do pagamento: ' + t : '';
+    ext.style.display = t ? '' : 'none';
+  }
+}
+
+// registra UM pagamento de parcela como despesa vinculada ao contrato.
+async function saveFinPagamento() {
+  const f = (S.financiamentos || []).find(x => x.id === finPagId);
+  if (!f) { toast('Contrato não encontrado.'); return; }
+  const r = financiamentoResumo(f);
+  if (r.situacao === 'cancelado' || r.situacao === 'quitado') { toast('Contrato ' + r.situacao + ' não aceita pagamento.'); return; }
+  const num = Number(f.numParcelas) || 0;
+  const base = Math.max(0, Math.min(Math.floor(Number(f.parcelasAntesLagos) || 0), num));
+  const n = parseInt($('finpag-parcela').value, 10) || 0;
+  const data = $('finpag-data').value || todayStr();
+
+  if (n < 1 || n > num) { toast('Escolha uma parcela válida.'); return; }
+  if (n <= base) { toast(`A parcela ${n} está coberta pelas parcelas anteriores ao Lagos.`); return; }
+  if (!data || isNaN(new Date(data + 'T00:00:00').getTime())) { toast('Informe uma data de pagamento válida.'); return; }
+  if (data > todayStr()) { toast('A data do pagamento não pode ser futura.'); return; }
+  // revalida AGORA se a parcela ainda está aberta (corrida / soft-delete)
+  if (financiamentoPagamentos(f.id).some(t => Number(t.parcelaNum) === n)) { toast(`A parcela ${n} já foi registrada.`); return; }
+
+  if (_salvandoPag) return;           // bloqueia duplo toque
+  _salvandoPag = true;
+  const id = 'fin_' + f.id + '_p' + n; // id determinístico: reenvio não duplica
+  const t = {
+    tipo: 'despesa', cat: 'financiamento', origem: 'frota', veiculo: f.veiculo,
+    financiamentoId: f.id, parcelaNum: n, valor: centavos(f.valorParcela), data,
+    desc: 'Parcela ' + n + '/' + num + ' · ' + (f.credor || 'Financiamento'),
+    autorNome: me.nome || me.email, autorUid: me.uid, ts: Date.now(),
+  };
+  closeOverlay('modal-finpag');
+  try {
+    await dataSet('tx', id, t);
+    toast(`Parcela ${n} registrada ✓`);
+  } catch (e) { console.error(e); toast('Não foi possível salvar. Tente de novo.'); }
+  _salvandoPag = false;
+}
+
+// um lançamento é pagamento de financiamento?
+function ehPagamentoFin(t) { return !!(t && t.cat === 'financiamento' && t.financiamentoId); }
 
 function socioRow(s, E) {
   const papel = (E.permissoes || {})[permKey(s.email)] || 'admin';

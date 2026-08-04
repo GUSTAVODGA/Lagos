@@ -68,13 +68,9 @@ aparece a inicial colorida de cada um.
 
 ## 6. Regras de segurança (trava o acesso e respeita as permissões)
 
-Na aba **Regras** do Firestore, apague tudo e cole o texto abaixo,
-**trocando os 3 e-mails** pelos e-mails reais criados no passo 4. Depois **Publicar**.
-
-Estas regras fazem duas coisas: (1) só os 3 e-mails leem/escrevem; (2) quem
-está marcado como **"Só visualiza"** no app **não consegue gravar nada**, nem
-mesmo por fora do aplicativo — o banco recusa a escrita. O papel de cada sócio
-fica em `empresa/dados.permissoes`; só **Administrador** altera a coleção `empresa`.
+**Estado atual publicado no Console (conferido pelo dono do projeto).** A regra
+real em produção é um **catch-all**: qualquer sócio autorizado lê e grava em
+**qualquer coleção**. É o que está versionado em `frota/firestore.rules`:
 
 ```
 rules_version = '2';
@@ -87,35 +83,38 @@ service cloud.firestore {
         'lagosoperacional+thadeu@gmail.com'
       ];
     }
-    // papel do usuário logado, lido de empresa/dados (padrão: admin)
-    function papel() {
-      let e = /databases/$(database)/documents/empresa/dados;
-      let key = request.auth.token.email.replace('[.#$/\\[\\]]', '_');
-      return (isSocio() && exists(e) && ('permissoes' in get(e).data)
-              && (key in get(e).data.permissoes))
-        ? get(e).data.permissoes[key] : 'admin';
+    match /{document=**} {
+      allow read, write: if isSocio();
     }
-    function podeEditar() { return isSocio() && papel() != 'leitor'; }
-    function isAdmin()    { return isSocio() && papel() == 'admin'; }
-
-    // dados da empresa e permissões: só administradores gravam
-    match /empresa/{doc}  { allow read: if isSocio(); allow write: if isAdmin(); }
-    // cada sócio ajusta o próprio nome/foto
-    match /profiles/{uid} { allow read: if isSocio(); allow write: if isSocio(); }
-    // operação e financeiro: "Só visualiza" não grava
-    match /vehicles/{id}  { allow read: if isSocio(); allow write: if podeEditar(); }
-    match /drivers/{id}   { allow read: if isSocio(); allow write: if podeEditar(); }
-    match /tx/{id}        { allow read: if isSocio(); allow write: if podeEditar(); }
-    match /kmlog/{id}     { allow read: if isSocio(); allow write: if podeEditar(); }
-    match /eventos/{id}   { allow read: if isSocio(); allow write: if podeEditar(); }
-    match /anexos/{id}    { allow read: if isSocio(); allow write: if podeEditar(); }
   }
 }
 ```
 
-Com isso, mesmo que alguém descubra o endereço do app, sem estar logado com um
-desses 3 e-mails **não lê nem escreve nada** — e um sócio "Só visualiza" também
-não consegue gravar, nem por chamada direta ao banco.
+O que essa regra garante: sem estar logado com um dos 3 e-mails autorizados,
+**não se lê nem grava nada**. Como o `match /{document=**}` cobre todas as
+coleções, **`financiamentos` já está autorizada** — não é preciso alterar o
+Console para publicar o recurso de financiamentos.
+
+> **Diferenciação de papéis (admin / editor / "só visualiza").** Ela existe e é
+> aplicada **na interface do app** (função `podeEditar()`/`exigirEdicao()`): o
+> "só visualiza" tem os botões de cadastro escondidos e as ações bloqueadas.
+> Porém, com a regra catch-all atual, o **Firestore não distingue papéis** — para
+> o banco, todo sócio autenticado pode gravar. Ou seja, a restrição do "só
+> visualiza" hoje é **apenas no aplicativo**, não reforçada pelo banco.
+>
+> Reforçar isso no Firestore (enforcement de leitor por coleção, com
+> `podeEditar()`) seria **outra etapa, deliberada** — e mudá-la agora poderia
+> **bloquear usuários existentes**. Não faz parte desta entrega.
+
+**Validação opcional (não necessária para publicar):** no Console, aba
+**Regras → Playground**, simular `get`/`create` em `financiamentos/teste`:
+autenticado com um dos 3 e-mails → **allow**; e-mail fora da lista ou não
+autenticado → **deny**. No app real, logado como sócio, criar um contrato de
+teste e conferir que o documento aparece em `financiamentos`; depois apagar.
+
+**Opção futura (CLI):** para versionar/publicar regras por linha de comando,
+adotar `firebase-tools` com `firebase.json` apontando `firestore.rules` e um
+`.firebaserc`; então `firebase deploy --only firestore:rules`. Não adotado agora.
 
 ## 7. Autorizar o domínio do app
 

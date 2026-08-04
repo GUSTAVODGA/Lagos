@@ -13,7 +13,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Lagos">
-<link rel="stylesheet" href="style.css?v=42">
+<link rel="stylesheet" href="style.css?v=43">
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
@@ -241,7 +241,7 @@
       </button>
     </div>
 
-    <p class="about-foot">Lagos Serviços de Transporte · v1.28</p>
+    <p class="about-foot">Lagos Serviços de Transporte · v1.29</p>
   </section>
 
   <!-- ── NAV INFERIOR: 5 módulos ── -->
@@ -294,7 +294,7 @@
     <div class="sheet-head"><h3>Lançamento</h3><button class="x" onclick="closeOverlay('modal-tx-detail')">✕</button></div>
     <div id="tx-detail-body"></div>
     <div class="fld-row">
-      <button class="btn btn-secondary" data-ic="pencil" onclick="editTxFromDetail()">Editar</button>
+      <button class="btn btn-secondary" id="tx-edit-btn" data-ic="pencil" onclick="editTxFromDetail()">Editar</button>
       <button class="btn btn-danger" data-ic="trash" onclick="deleteTxFromDetail()">Excluir</button>
     </div>
   </div>
@@ -357,6 +357,47 @@
     <label class="fld"><span>Odômetro (km)</span><input type="text" id="km-valor" inputmode="numeric" placeholder="Ex.: 148900"></label>
     <label class="fld"><span>Data</span><input type="date" id="km-data"></label>
     <button class="btn btn-primary btn-block" onclick="saveKmLog()">Salvar</button>
+  </div>
+</div>
+
+<!-- Novo/editar financiamento -->
+<div class="overlay" id="modal-fin">
+  <div class="sheet">
+    <div class="sheet-head"><h3 id="fin-form-title" data-ic="landmark">Novo financiamento</h3><button class="x" onclick="closeOverlay('modal-fin')">✕</button></div>
+    <p class="modal-note" id="fin-veh-info"></p>
+    <label class="fld"><span>Credor / instituição</span><input type="text" id="fin-credor" placeholder="Ex.: Banco do Brasil" oninput="finFormRecalc()"></label>
+    <div class="fld-row">
+      <label class="fld"><span>Valor total do bem</span><input type="text" id="fin-valor-total" inputmode="decimal" placeholder="0,00" oninput="finFormRecalc()"></label>
+      <label class="fld"><span>Entrada</span><input type="text" id="fin-entrada" inputmode="decimal" placeholder="0,00" oninput="finFormRecalc()"></label>
+    </div>
+    <label class="fld"><span>Valor financiado <small>(sugerido: total − entrada)</small></span><input type="text" id="fin-financiado" inputmode="decimal" placeholder="0,00" oninput="finFinanciadoTocado=true;finFormRecalc()"></label>
+    <div class="fld-row">
+      <label class="fld"><span>Nº de parcelas</span><input type="text" id="fin-parcelas" inputmode="numeric" placeholder="Ex.: 48" oninput="finFormRecalc()"></label>
+      <label class="fld"><span>Valor da parcela</span><input type="text" id="fin-valor-parcela" inputmode="decimal" placeholder="0,00" oninput="finFormRecalc()"></label>
+    </div>
+    <label class="fld"><span>Parcelas já pagas antes do cadastro no Lagos</span><input type="text" id="fin-base" inputmode="numeric" value="0"></label>
+    <div class="fld-hint" id="fin-base-hint">Use para pagamentos feitos antes de começar o controle no Lagos. Não serão lançados no Financeiro.</div>
+    <label class="fld"><span>Primeiro vencimento</span><input type="date" id="fin-primeiro-venc" oninput="finFormRecalc()" onchange="finFormRecalc()"></label>
+    <div class="fld-hint" id="fin-venc-extenso" style="display:none"></div>
+    <label class="fld"><span>Observações <small>(opcional)</small></span><textarea id="fin-obs" rows="2" placeholder="Anotações sobre o contrato…"></textarea></label>
+    <div class="fin-resumo" id="fin-resumo"></div>
+    <button class="btn btn-primary btn-block" onclick="saveFinanciamento()">Salvar</button>
+    <button class="btn-link fin-danger" id="fin-del-btn" style="display:none" onclick="excluirOuCancelarFin()">Excluir contrato</button>
+  </div>
+</div>
+
+<!-- Registrar pagamento de parcela -->
+<div class="overlay" id="modal-finpag">
+  <div class="sheet">
+    <div class="sheet-head"><h3 data-ic="landmark">Registrar parcela</h3><button class="x" onclick="closeOverlay('modal-finpag')">✕</button></div>
+    <p class="modal-note" id="finpag-info"></p>
+    <label class="fld"><span>Parcela</span><select id="finpag-parcela" onchange="finPagChanged()"></select></label>
+    <div class="fld-hint" id="finpag-venc"></div>
+    <label class="fld"><span>Valor da parcela <small>(do contrato)</small></span><input type="text" id="finpag-valor" readonly></label>
+    <label class="fld"><span>Data do pagamento</span><input type="date" id="finpag-data" oninput="finPagChanged()" onchange="finPagChanged()"></label>
+    <div class="fld-hint" id="finpag-data-extenso"></div>
+    <div class="fld-hint" id="finpag-desc"></div>
+    <button class="btn btn-primary btn-block" onclick="saveFinPagamento()">Confirmar pagamento</button>
   </div>
 </div>
 
@@ -530,6 +571,6 @@
 
 <div id="toast"></div>
 
-<script src="app.js?v=42"></script>
+<script src="app.js?v=43"></script>
 </body>
 </html>

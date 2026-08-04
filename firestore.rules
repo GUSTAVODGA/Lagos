@@ -1,0 +1,28 @@
+// ESTADO REAL atualmente publicado no Console do Firebase (conferido pelo dono
+// do projeto). Regra "catch-all": qualquer sócio autorizado lê e grava em
+// QUALQUER coleção — inclusive `financiamentos`, que portanto já está liberada
+// sem nenhuma alteração no Console.
+//
+// IMPORTANTE — política de acesso:
+// A diferenciação de papéis (admin / editor / "só visualiza") é aplicada
+// APENAS na interface do app (função podeEditar()/exigirEdicao()). As regras
+// abaixo NÃO distinguem papéis: para o Firestore, todo sócio autenticado pode
+// gravar. Endurecer isso (enforcement de leitor no banco) seria OUTRA etapa,
+// deliberada, e não faz parte desta entrega — mudá-la agora poderia bloquear
+// usuários existentes.
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSocio() {
+      return request.auth != null && request.auth.token.email in [
+        'lagosoperacional+luispaulo@gmail.com',
+        'lagosoperacional+ygor@gmail.com',
+        'lagosoperacional+thadeu@gmail.com'
+      ];
+    }
+    match /{document=**} {
+      allow read, write: if isSocio();
+    }
+  }
+}
